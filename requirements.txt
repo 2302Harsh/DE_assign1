@@ -1,0 +1,14 @@
+# Tested with Python 3.14. Generated from a clean virtual environment.
+# Direct dependencies of the pipeline scripts:
+pandas==3.0.6
+geopandas==1.1.4
+duckdb==1.5.5
+requests==2.34.2
+python-dotenv==1.2.3
+
+# Pulled in by geopandas but imported or required directly (shapefile reading,
+# CRS transforms, point geometries), so they are pinned explicitly:
+shapely==2.1.2
+pyogrio==0.13.0
+pyproj==3.8.0
+numpy==2.5.3

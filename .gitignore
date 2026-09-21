@@ -1,0 +1,11 @@
+# Secrets: holds the Open Charge Map API key. Also leave it out of any submission zip.
+.env
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Temporary files from interrupted downloads
+data/raw/*.part
+data/processed/*.log
