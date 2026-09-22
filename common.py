@@ -25,8 +25,10 @@ DATABASE_DIR = PROJECT_DIR / "database"                 # step 04 writes here
 EV_CSV_PATH = RAW_DATA_DIR / "ev_chargers.csv"                          # step 01 output, step 02 input
 SA4_SHAPEFILE_PATH = RAW_DATA_DIR / "SA4_shapefile" / "SA4_2026_AUST_GDA2020.shp"  # step 01 output, steps 02 & 04 input
 OCM_CACHE_PATH = RAW_DATA_DIR / "ocm_au_pois.json"                       # step 03's cached Open Charge Map download
+OSM_CACHE_PATH = RAW_DATA_DIR / "osm_au_charging.json"                   # step 03's cached OpenStreetMap download
 CLEANED_PATH = PROCESSED_DATA_DIR / "ev_chargers_cleaned_sa4.csv"       # step 02 output, step 03 input
 AUGMENTED_PATH = PROCESSED_DATA_DIR / "ev_chargers_augmented.csv"       # step 03 output, step 04 input
+AUDIT_PATH = PROCESSED_DATA_DIR / "augmentation_audit.csv"              # step 03's match/reject audit trail
 DATABASE_PATH = DATABASE_DIR / "ev_database.duckdb"                     # step 04 output
 SCHEMA_PATH = DATABASE_DIR / "schema.sql"                               # step 04 input (table definitions)
 
@@ -40,7 +42,8 @@ PROJECTED_CRS = "EPSG:9473"
 # Columns that must not be parsed as numbers when the processed CSVs are re-read
 # (otherwise SA4 code 106 becomes 106.0 and postcodes lose leading zeros).
 # pandas.read_csv(..., dtype=PROCESSED_DTYPES) keeps these columns as text.
-PROCESSED_DTYPES = {"sa4_code": "string", "postcode": "string"}
+# ext_postcode (added by 03) is a postcode too - same risk, same fix.
+PROCESSED_DTYPES = {"sa4_code": "string", "postcode": "string", "ext_postcode": "string"}
 
 # Lower-case spelling variant -> canonical operator name. Keys are compared after
 # whitespace is collapsed and any trailing "(...)" qualifier is removed, so
@@ -48,10 +51,17 @@ PROCESSED_DTYPES = {"sa4_code": "string", "postcode": "string"}
 # Names not listed here are kept as written. The TfNSW file truncates some names to
 # 13 characters ("Energy Austra"); the completions below were checked against the
 # station addresses (e.g. "University of" is the University of Wollongong charger).
+#
+# Three sources feed this table: TfNSW (02), Open Charge Map (03) and
+# OpenStreetMap (03). The OSM-specific entries below were found by inspecting
+# OSM's "operator" tag values against the TfNSW spellings already listed here
+# (e.g. OSM tags Ampol's network "AmpCharge"; TfNSW calls the same network "Ampol").
 OPERATOR_ALIASES = {
     "bp australia": "BP",
     "bp pulse": "BP",
     "tesla motors": "Tesla",
+    "tesla, inc.": "Tesla",       # OSM operator:wikipedia-sourced variant
+    "tesla supercharger": "Tesla",
     "non-networked": "Non-networked",
     "evie networks": "Evie",
     "charge hub": "ChargeHub",
@@ -61,8 +71,10 @@ OPERATOR_ALIASES = {
     "wevolt": "Wevolt",
     "noodoe ev": "Noodoe",
     "ampol ampcharge": "Ampol",
+    "ampcharge": "Ampol",         # OSM operator tag for Ampol's charging network
     "viva energy a": "Viva Energy Australia",
     "plus es manag": "PLUS ES",
+    "plus es": "PLUS ES",         # OSM uses title case ("Plus ES"); force TfNSW's all-caps spelling
     "energy austra": "Energy Australia",
     "fast cities a": "Fast Cities Australia",
     "university of": "University of Wollongong",

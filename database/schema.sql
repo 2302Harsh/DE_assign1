@@ -8,19 +8,21 @@
 --
 -- Design: third normal form. Regions, operators, locations, chargers and plug types
 -- each live in one table, so an operator's spelling or a location's SA4 region is
--- stored once. Open Charge Map (OCM) augmentation sits in its own tables because it
+-- stored once. External-source augmentation sits in its own tables because it
 -- exists only for the DC chargers that were matched.
 --
 -- Table overview (see README.md for the full normalisation discussion):
 --   sa4_regions          one row per ABS SA4 region (all of them, even with 0 chargers)
---   operators            one row per canonical operator name (shared by both sources)
+--   operators            one row per canonical operator name (shared by all three sources:
+--                        TfNSW, Open Charge Map and OpenStreetMap)
 --   locations            one row per distinct (latitude, longitude)
 --   chargers             one row per physical charger; links a location to an operator
---   plug_types           one row per distinct plug type name reported by OCM
---   ocm_matches          one row per DC charger that was matched against OCM (the
---                        augmentation "audit trail": which method matched, how far away)
+--   plug_types           one row per distinct plug type name reported by an external source
+--   charger_matches      one row per DC charger that was matched against an external
+--                        source (the augmentation "audit trail": which source, which
+--                        method, how far away - see 03_data_augmentation.py)
 --   charger_plug_types   join table: which plug types (plug_types) a charger's
---                        matched OCM site (ocm_matches) reports
+--                        matched external site (charger_matches) reports
 
 INSTALL spatial;
 LOAD spatial;
@@ -29,7 +31,7 @@ LOAD spatial;
 DROP VIEW IF EXISTS v_sa4_coverage;
 DROP VIEW IF EXISTS v_chargers;
 DROP TABLE IF EXISTS charger_plug_types;
-DROP TABLE IF EXISTS ocm_matches;
+DROP TABLE IF EXISTS charger_matches;
 DROP TABLE IF EXISTS chargers;
 DROP TABLE IF EXISTS plug_types;
 DROP TABLE IF EXISTS operators;
@@ -85,29 +87,46 @@ CREATE TABLE plug_types (
     plug_type_name  VARCHAR NOT NULL UNIQUE
 );
 
--- Audit trail for the OCM augmentation. One row per DC charger that was matched
--- against OCM; no row means the charger was never attempted (AC and upcoming).
--- match_method 'none' means it was attempted but no OCM site qualified.
---   num_points     OCM's count of charging bays (NULL if OCM does not say)
---   num_connectors sum of connection Quantity (1 when unstated)
---   price_per_kwh  AUD per kWh parsed from usage_cost; 0 = free; NULL = not parseable
-CREATE TABLE ocm_matches (
-    charger_id        INTEGER PRIMARY KEY REFERENCES chargers (charger_id),
-    match_method      VARCHAR NOT NULL
-        CHECK (match_method IN ('operator_and_distance', 'distance_only', 'none')),
-    match_distance_m  DOUBLE,
-    ocm_poi_id        INTEGER,
-    ocm_operator_id   INTEGER REFERENCES operators (operator_id),
-    usage_cost        VARCHAR,
-    price_per_kwh     DOUBLE CHECK (price_per_kwh >= 0),
-    num_points        INTEGER,
-    num_connectors    INTEGER,
-    CHECK ((match_method = 'none') = (ocm_poi_id IS NULL))
+-- Audit trail for augmentation against the two external sources (see
+-- 03_data_augmentation.py). One row per DC charger that was *attempted*
+-- against a source that found at least one nearby candidate; a charger with
+-- no row here either isn't a DC charger or had no candidate from either
+-- source within range (data/processed/augmentation_audit.csv has the full
+-- accepted/rejected/no-candidate trail for every DC charger, including those
+-- with no row here).
+--   augmentation_source  which source this match came from
+--   source_poi_id        the matched site's id in that source (OCM's numeric
+--                        ID, or OSM's "node/<id>" / "way/<id>")
+--   ext_*                the matched site's own operator/name/address/postcode,
+--                        kept alongside chargers.operator_id (the TfNSW value)
+--                        so the two can be compared rather than one overwriting
+--                        the other
+--   num_points           the source's count of charging bays (NULL if unstated)
+--   num_connectors       sum of connector counts across all of the site's connections
+--   rate_kw              highest per-connector charging power the source reports, in kW
+--   price_per_kwh        AUD per kWh parsed from usage_cost; 0 = free; NULL = not
+--                        parseable or not offered by this source (OpenStreetMap
+--                        has no priced-tariff field, so this is always NULL there)
+CREATE TABLE charger_matches (
+    charger_id           INTEGER PRIMARY KEY REFERENCES chargers (charger_id),
+    augmentation_source  VARCHAR NOT NULL CHECK (augmentation_source IN ('open_charge_map', 'openstreetmap')),
+    match_method         VARCHAR NOT NULL CHECK (match_method IN ('operator_and_distance', 'distance_only')),
+    match_distance_m     DOUBLE NOT NULL,
+    source_poi_id        VARCHAR NOT NULL,
+    ext_operator_id       INTEGER REFERENCES operators (operator_id),
+    ext_name              VARCHAR,
+    ext_address           VARCHAR,
+    ext_postcode          VARCHAR,
+    usage_cost            VARCHAR,
+    price_per_kwh         DOUBLE CHECK (price_per_kwh >= 0),
+    num_points            INTEGER,
+    num_connectors        INTEGER,
+    rate_kw               DOUBLE CHECK (rate_kw > 0)
 );
 
--- Plug types reported by the matched OCM site (replaces a comma-joined string).
+-- Plug types reported by the matched external site (replaces a comma-joined string).
 CREATE TABLE charger_plug_types (
-    charger_id    INTEGER NOT NULL REFERENCES ocm_matches (charger_id),
+    charger_id    INTEGER NOT NULL REFERENCES charger_matches (charger_id),
     plug_type_id  INTEGER NOT NULL REFERENCES plug_types (plug_type_id),
     PRIMARY KEY (charger_id, plug_type_id)
 );

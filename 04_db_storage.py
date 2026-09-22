@@ -28,13 +28,13 @@ SA4_SIMPLIFY_TOLERANCE_DEG = 0.0005
 REQUIRED_COLUMNS = {
     "charger_id", "station_name", "station_address", "latitude", "longitude", "lga_name",
     "postcode", "source", "operator", "number_of_plugs", "charger_type", "status",
-    "charger_rating_kw", "sa4_code", "sa4_assignment", "ocm_poi_id", "ocm_operator",
-    "usage_cost", "price_per_kwh", "plug_types", "num_points", "num_connectors",
-    "match_method", "match_distance_m",
+    "charger_rating_kw", "sa4_code", "sa4_assignment", "augmentation_source", "source_poi_id",
+    "ext_operator", "ext_name", "ext_address", "ext_postcode", "usage_cost", "price_per_kwh",
+    "plug_types", "num_points", "num_connectors", "rate_kw", "match_method", "match_distance_m",
 }
 # Every table in the database, used by verify() to print row counts.
 TABLES = [
-    "sa4_regions", "operators", "locations", "chargers", "plug_types", "ocm_matches",
+    "sa4_regions", "operators", "locations", "chargers", "plug_types", "charger_matches",
     "charger_plug_types",
 ]
 # (child table, foreign-key column, parent table, parent key) - every
@@ -44,9 +44,9 @@ FOREIGN_KEYS = [
     ("locations", "sa4_code", "sa4_regions", "sa4_code"),
     ("chargers", "location_id", "locations", "location_id"),
     ("chargers", "operator_id", "operators", "operator_id"),
-    ("ocm_matches", "charger_id", "chargers", "charger_id"),
-    ("ocm_matches", "ocm_operator_id", "operators", "operator_id"),
-    ("charger_plug_types", "charger_id", "ocm_matches", "charger_id"),
+    ("charger_matches", "charger_id", "chargers", "charger_id"),
+    ("charger_matches", "ext_operator_id", "operators", "operator_id"),
+    ("charger_plug_types", "charger_id", "charger_matches", "charger_id"),
     ("charger_plug_types", "plug_type_id", "plug_types", "plug_type_id"),
 ]
 
@@ -78,11 +78,12 @@ def build_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     if missing:
         raise ValueError(f"Input data is missing required columns: {sorted(missing)}")
 
-    # Operators come from both sources, already reduced to one canonical spelling.
-    # pd.concat stacks the TfNSW operator column and the OCM operator column
-    # into one long series before deduplicating, so both sources share one
-    # operators table instead of ending up with two separate id spaces.
-    operators = lookup_table(pd.concat([df["operator"], df["ocm_operator"]]),
+    # Operators come from all three sources, already reduced to one canonical
+    # spelling. pd.concat stacks the TfNSW operator column and the matched
+    # external site's operator column into one long series before
+    # deduplicating, so every source shares one operators table instead of
+    # ending up with separate id spaces per source.
+    operators = lookup_table(pd.concat([df["operator"], df["ext_operator"]]),
                              "operator_id", "operator_name")
     operator_ids = dict(zip(operators["operator_name"], operators["operator_id"]))
 
@@ -101,14 +102,19 @@ def build_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         "charger_rating_kw", "number_of_plugs", "source",
     ]].assign(operator_id=df["operator"].map(operator_ids))
 
-    # Only DC chargers that went through the augmentation step in 03 have a
-    # match_method at all (AC/upcoming rows are NULL there); ocm_matches only
-    # ever holds rows for chargers that were actually attempted.
-    matched = df[df["match_method"].notna()]
-    ocm_matches = matched[[
-        "charger_id", "match_method", "match_distance_m", "ocm_poi_id", "usage_cost",
-        "price_per_kwh", "num_points", "num_connectors",
-    ]].assign(ocm_operator_id=matched["ocm_operator"].map(operator_ids).astype("Int64"))
+    # Only DC chargers that were actually matched by 03 (against either
+    # external source) have an augmentation_source at all; every other
+    # augmentation column is NULL on every other row. charger_matches only
+    # ever holds rows for chargers that were successfully matched - a
+    # charger that was attempted but rejected or found no candidate has no
+    # row here (that full trail, including rejections, is in
+    # data/processed/augmentation_audit.csv, not in the database).
+    matched = df[df["augmentation_source"].notna()]
+    charger_matches = matched[[
+        "charger_id", "augmentation_source", "match_method", "match_distance_m", "source_poi_id",
+        "ext_name", "ext_address", "ext_postcode", "usage_cost", "price_per_kwh",
+        "num_points", "num_connectors", "rate_kw",
+    ]].assign(ext_operator_id=matched["ext_operator"].map(operator_ids).astype("Int64"))
 
     # plug_types in the CSV is a single comma-joined string per charger, e.g.
     # "CCS (Type 2), CHAdeMO". str.split(", ") turns that into a list per row,
@@ -130,7 +136,7 @@ def build_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
     return {
         "operators": operators, "locations": locations, "chargers": chargers,
-        "plug_types": plug_types, "ocm_matches": ocm_matches,
+        "plug_types": plug_types, "charger_matches": charger_matches,
         "charger_plug_types": charger_plug_types,
     }
 
@@ -170,10 +176,10 @@ def load_database(con: duckdb.DuckDBPyConnection, tables: dict[str, pd.DataFrame
         FROM stg_locations
     """)
     # Parents before children: the foreign keys are enforced on insert.
-    # chargers references locations/operators, ocm_matches references
-    # chargers, charger_plug_types references ocm_matches and plug_types - so
-    # this order must be followed or DuckDB will reject the insert.
-    for name in ["chargers", "plug_types", "ocm_matches", "charger_plug_types"]:
+    # chargers references locations/operators, charger_matches references
+    # chargers, charger_plug_types references charger_matches and plug_types -
+    # so this order must be followed or DuckDB will reject the insert.
+    for name in ["chargers", "plug_types", "charger_matches", "charger_plug_types"]:
         con.execute(f"INSERT INTO {name} BY NAME SELECT * FROM stg_{name}")
 
 
@@ -228,6 +234,16 @@ def verify(con: duckdb.DuckDBPyConnection, expected_chargers: int) -> None:
     """).fetchone()
     print(f"Coverage: of {nsw[2]} NSW SA4 regions, {nsw[0]} have no existing charger "
           f"and {nsw[1]} have no existing DC charger")
+
+    # Informational: how the augmentation split between the two external
+    # sources, out of every DC charger (not just NSW - matches 03's own summary).
+    dc_total = con.execute("SELECT count(*) FROM chargers WHERE charger_type = 'DC'").fetchone()[0]
+    by_source = con.execute("""
+        SELECT augmentation_source, count(*) FROM charger_matches GROUP BY 1 ORDER BY 1
+    """).fetchall()
+    augmented = sum(n for _, n in by_source)
+    print(f"Augmentation: {augmented}/{dc_total} DC chargers ({augmented / dc_total:.1%}) - "
+          + ", ".join(f"{source}: {n}" for source, n in by_source))
 
     # Confirms both spatial (R-tree) indexes from schema.sql were actually created.
     indexes = con.execute("SELECT count(*) FROM duckdb_indexes() WHERE sql LIKE '%RTREE%'").fetchone()[0]
