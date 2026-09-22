@@ -10,6 +10,17 @@
 -- each live in one table, so an operator's spelling or a location's SA4 region is
 -- stored once. Open Charge Map (OCM) augmentation sits in its own tables because it
 -- exists only for the DC chargers that were matched.
+--
+-- Table overview (see README.md for the full normalisation discussion):
+--   sa4_regions          one row per ABS SA4 region (all of them, even with 0 chargers)
+--   operators            one row per canonical operator name (shared by both sources)
+--   locations            one row per distinct (latitude, longitude)
+--   chargers             one row per physical charger; links a location to an operator
+--   plug_types           one row per distinct plug type name reported by OCM
+--   ocm_matches          one row per DC charger that was matched against OCM (the
+--                        augmentation "audit trail": which method matched, how far away)
+--   charger_plug_types   join table: which plug types (plug_types) a charger's
+--                        matched OCM site (ocm_matches) reports
 
 INSTALL spatial;
 LOAD spatial;
@@ -101,6 +112,9 @@ CREATE TABLE charger_plug_types (
     PRIMARY KEY (charger_id, plug_type_id)
 );
 
+-- R-tree indexes speed up spatial queries (ST_Within, ST_Intersects, nearest-
+-- polygon searches, ...) on these two geometry columns the way a normal
+-- B-tree index speeds up an equality/range lookup on an ordinary column.
 CREATE INDEX idx_locations_geom ON locations USING RTREE (geom);
 CREATE INDEX idx_sa4_regions_geom ON sa4_regions USING RTREE (geom);
 
